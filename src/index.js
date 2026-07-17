@@ -7,19 +7,17 @@ import {
 import dotenv from "dotenv";
 import { Jimp, rgbaToInt } from "jimp";
 import express from "express";
-
+const IMAGE_SIZE = 32;
+const FRAME_COUNT = 8;
+const PARTICLE_COUNT = 40;
 const app = express();
 
-app.get("/", (req,res)=>{
-
-    res.send("Bot is running.");
-
+app.get("/", (req, res) => {
+  res.send("Bot is running.");
 });
 
-app.listen(3000,()=>{
-
-    console.log("Server Started");
-
+app.listen(3000, () => {
+  console.log("Server Started");
 });
 
 dotenv.config();
@@ -32,24 +30,62 @@ const client = new Client({
   ],
 });
 
+//=====================================
+// Fire Effect Utility
+//=====================================
+
+function createParticle() {
+  return {
+    x: Math.random() * IMAGE_SIZE,
+    y: IMAGE_SIZE - 2,
+    vx: Math.random() * 0.6 - 0.3,
+    vy: -(Math.random() * 1.5 + 0.5),
+    size: Math.floor(Math.random() * 2) + 1,
+    life: Math.floor(Math.random() * 5) + 6,
+  };
+}
+
+function updateParticle(particle) {
+  particle.x += particle.vx;
+  particle.y += particle.vy;
+  particle.life--;
+}
+
+function isAlive(particle) {
+  return particle.life > 0;
+}
+
+function drawParticle(image, particle) {
+  const color = rgbaToInt(255, Math.floor(Math.random() * 180) + 50, 0, 255);
+  for (let y = 0; y < particle.size; y++) {
+    for (let x = 0; x < particle.size; x++) {
+      const drawX = Math.floor(particle.x + x);
+      const drawY = Math.floor(particle.y + y);
+      if (
+        drawX >= 0 &&
+        drawX < IMAGE_SIZE &&
+        drawY >= 0 &&
+        drawY < IMAGE_SIZE
+      ) {
+        image.setPixelColor(color, drawX, drawY);
+      }
+    }
+  }
+}
 
 client.once(Events.ClientReady, (readyClient) => {
   console.log(`${readyClient.user.tag} としてログインしました`);
 });
 
-
 client.on("messageCreate", async (message) => {
-
   // Bot自身は無視
   if (message.author.bot) return;
-
 
   //=====================
   // helpコマンド
   //=====================
 
   if (message.content === "/help") {
-
     await message.reply(`
 【使い方】
 
@@ -63,15 +99,12 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-
   //=====================
   // fireエフェクト
   //=====================
 
   if (message.content === "/effect fire") {
-
     try {
-
       // 透明な32×32画像を生成
       const image = new Jimp({
         width: 32,
@@ -79,25 +112,21 @@ client.on("messageCreate", async (message) => {
         color: 0x00000000,
       });
 
-
       //------------------
       // 炎っぽい粒子を描画
       //------------------
 
       for (let y = 0; y < 32; y++) {
-
         for (let x = 0; x < 32; x++) {
-
           // 下側ほど描画されやすくする
           const probability = y / 32;
 
           if (Math.random() < probability * 0.6) {
-
             const color = rgbaToInt(
               255,
               Math.floor(Math.random() * 180),
               0,
-              255
+              255,
             );
 
             image.setPixelColor(color, x, y);
@@ -105,35 +134,23 @@ client.on("messageCreate", async (message) => {
         }
       }
 
-
       // pngへ変換
       const buffer = await image.getBuffer("image/png");
 
-
-      const file = new AttachmentBuilder(
-        buffer,
-        {
-          name: "fire.png",
-        }
-      );
-
+      const file = new AttachmentBuilder(buffer, {
+        name: "fire.png",
+      });
 
       await message.reply({
         content: "炎エフェクトを生成しました。",
         files: [file],
       });
-
     } catch (error) {
-
       console.error(error);
 
-      await message.reply(
-        "画像の生成に失敗しました。"
-      );
+      await message.reply("画像の生成に失敗しました。");
     }
   }
-
 });
-
 
 client.login(process.env.DISCORD_TOKEN);
