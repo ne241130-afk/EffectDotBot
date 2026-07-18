@@ -43,12 +43,9 @@ const parameterPrompt = `
 あなたはゲームエフェクトを生成するAIです。
 ユーザーのイメージから、
 適切なパラメータを決定してください。
-attributeは、
-・fire
-・poison
-・ice
-・thunder
-のいずれかのみ許可します。
+attributesには、既存属性（fire / poison / ice / thunder）と、
+ユーザーが指定した新しい属性名を1個以上入れてください。
+既存属性以外を含める場合は、その新属性の見た目を表すparticleも必ず指定してください。
 particleCountは、
 20～300
 
@@ -59,7 +56,18 @@ imageSizeは、
 32または64のみ許可します。
 必ずJSONのみを返してください。
 {
-"attribute":"",
+"attributes":[""],
+"particle":{
+  "spawn":"center",
+  "movement":"circle",
+  "spread":0.8,
+  "speed":0.5,
+  "life":24,
+  "fade":true,
+  "size":2,
+  "glow":true,
+  "colors":[[255,255,255],[255,255,180]]
+},
 "particleCount":0,
 "frameCount":0,
 "imageSize":0
@@ -585,39 +593,147 @@ function parseParameter(text) {
     .replace(/```json/g, "")
     .replace(/```/g, "")
     .trim();
+  const parameter = JSON.parse(jsonText);
+  const attributes = Array.isArray(parameter.attributes)
+    ? parameter.attributes
+    : parameter.attribute ? [parameter.attribute] : [];
+  if (attributes.length === 0) throw new Error("attributesが指定されていません。");
 
-  return JSON.parse(jsonText);
+  return {
+    ...parameter,
+    attributes: attributes.map((attribute) => String(attribute).toLowerCase()),
+    particleCount: Math.max(20, Math.min(Math.floor(Number(parameter.particleCount) || DEFAULT_PARTICLE_COUNT), 300)),
+    frameCount: Math.max(8, Math.min(Math.floor(Number(parameter.frameCount) || DEFAULT_FRAME_COUNT), 32)),
+    imageSize: [32, 64].includes(Number(parameter.imageSize)) ? Number(parameter.imageSize) : DEFAULT_IMAGE_SIZE,
+  };
+}
+
+// GeminiのJSONを解釈し、属性ごとのParticleを同じFrameへ描画する汎用Engine。
+const ATTRIBUTE_PARTICLE_PROFILES = {
+  fire: { spawn: "bottom", movement: "rise", spread: 0.13, speed: 1, life: 11, fade: true, size: 2, colors: [[255, 255, 0], [255, 140, 0], [255, 50, 0]] },
+  poison: { spawn: "bottom", movement: "rise", spread: 0.16, speed: 0.32, life: 24, fade: true, size: 3, colors: [[180, 80, 255], [50, 205, 50], [85, 26, 139]] },
+  ice: { spawn: "center", movement: "burst", spread: 1, speed: 1.4, life: 16, fade: true, size: 1, colors: [[255, 255, 255], [180, 255, 255], [120, 220, 255]] },
+  thunder: { spawn: "center", movement: "jitter", spread: 1, speed: 2.2, life: 7, fade: true, size: 1, glow: true, colors: [[255, 255, 255], [255, 255, 0], [255, 220, 80]] },
+};
+
+function normalizeParticleProfile(profile = {}) {
+  const colors = Array.isArray(profile.colors)
+    ? profile.colors.filter((color) => Array.isArray(color) && color.length === 3)
+    : [];
+  return {
+    spawn: ["center", "bottom"].includes(profile.spawn) ? profile.spawn : "center",
+    movement: ["rise", "burst", "jitter", "circle"].includes(profile.movement) ? profile.movement : "burst",
+    spread: Math.max(0, Math.min(Number(profile.spread) || 1, 2)),
+    speed: Math.max(0.05, Math.min(Number(profile.speed) || 1, 4)),
+    life: Math.max(2, Math.min(Math.floor(Number(profile.life) || 16), 60)),
+    fade: profile.fade !== false,
+    size: Math.max(1, Math.min(Math.floor(Number(profile.size) || 1), 8)),
+    glow: profile.glow === true,
+    colors: colors.length > 0 ? colors : [[255, 255, 255]],
+  };
+}
+
+function createEngineParticle(profile, imageSize) {
+  const angle = Math.random() * Math.PI * 2;
+  let vx = Math.cos(angle) * profile.speed * profile.spread;
+  let vy = Math.sin(angle) * profile.speed * profile.spread;
+  if (profile.movement === "rise") {
+    vx = (Math.random() * 2 - 1) * profile.speed * profile.spread;
+    vy = -(profile.speed * (0.5 + Math.random()));
+  }
+  return {
+    x: profile.spawn === "bottom" ? imageSize / 2 + (Math.random() * 2 - 1) * imageSize * profile.spread / 2 : imageSize / 2,
+    y: profile.spawn === "bottom" ? imageSize - 2 : imageSize / 2,
+    vx, vy, angle,
+    orbitRadius: Math.random() * imageSize * profile.spread / 2,
+    maxLife: profile.life + Math.floor(Math.random() * Math.max(1, profile.life / 3)),
+    life: 0,
+    size: Math.max(1, profile.size + Math.floor(Math.random() * 2) - 1),
+    profile,
+  };
+}
+
+function updateEngineParticle(particle, imageSize) {
+  const { profile } = particle;
+  if (profile.movement === "jitter") {
+    particle.vx += (Math.random() - 0.5) * profile.speed * 0.4;
+    particle.vy += (Math.random() - 0.5) * profile.speed * 0.4;
+    particle.x += particle.vx;
+    particle.y += particle.vy;
+  } else if (profile.movement === "circle") {
+    particle.angle += profile.speed * 0.12;
+    particle.x = imageSize / 2 + Math.cos(particle.angle) * particle.orbitRadius;
+    particle.y = imageSize / 2 + Math.sin(particle.angle) * particle.orbitRadius;
+  } else {
+    particle.x += particle.vx;
+    particle.y += particle.vy;
+    if (profile.movement === "rise") particle.vx += (Math.random() - 0.5) * 0.1;
+  }
+  particle.life++;
+}
+
+function drawEnginePixel(image, x, y, color, imageSize) {
+  if (x >= 0 && x < imageSize && y >= 0 && y < imageSize) image.setPixelColor(color, x, y);
+}
+
+function drawEngineParticle(image, particle, imageSize) {
+  const { profile } = particle;
+  const ratio = 1 - particle.life / particle.maxLife;
+  const colorIndex = Math.min(profile.colors.length - 1, Math.floor((1 - ratio) * profile.colors.length));
+  const [r, g, b] = profile.colors[colorIndex];
+  const alpha = profile.fade ? Math.max(0, Math.floor(255 * ratio)) : 255;
+  const drawSize = ratio < 0.3 ? 1 : particle.size;
+  const drawX = Math.floor(particle.x);
+  const drawY = Math.floor(particle.y);
+  if (profile.glow) {
+    const glowColor = rgbaToInt(r, g, b, Math.floor(alpha / 3));
+    drawEnginePixel(image, drawX - 1, drawY, glowColor, imageSize);
+    drawEnginePixel(image, drawX + drawSize, drawY, glowColor, imageSize);
+    drawEnginePixel(image, drawX, drawY - 1, glowColor, imageSize);
+    drawEnginePixel(image, drawX, drawY + drawSize, glowColor, imageSize);
+  }
+  const color = rgbaToInt(r, g, b, alpha);
+  for (let y = 0; y < drawSize; y++) {
+    for (let x = 0; x < drawSize; x++) drawEnginePixel(image, drawX + x, drawY + y, color, imageSize);
+  }
+}
+
+class ParticleEngine {
+  constructor(parameter) {
+    this.parameter = parameter;
+    this.attributes = Array.isArray(parameter.attributes)
+      ? parameter.attributes
+      : parameter.attribute ? [parameter.attribute] : [];
+    if (this.attributes.length === 0) throw new Error("attributesが指定されていません。");
+  }
+
+  async generateFrames() {
+    const { parameter, attributes } = this;
+    const particleSets = attributes.map((attribute) => {
+      const preset = ATTRIBUTE_PARTICLE_PROFILES[String(attribute).toLowerCase()];
+    if (!preset && !parameter.particle) throw new Error(`新属性 ${attribute} にはparticleが必要です。`);
+    const profile = normalizeParticleProfile(preset || parameter.particle);
+    return Array.from({ length: parameter.particleCount }, () => createEngineParticle(profile, parameter.imageSize));
+    });
+    const frames = [];
+    for (let frame = 0; frame < parameter.frameCount; frame++) {
+      const image = new Jimp({ width: parameter.imageSize, height: parameter.imageSize, color: 0x00000000 });
+      for (const particles of particleSets) {
+        for (let i = 0; i < particles.length; i++) {
+          const particle = particles[i];
+          if (particle.life < particle.maxLife) drawEngineParticle(image, particle, parameter.imageSize);
+          else particles[i] = createEngineParticle(particle.profile, parameter.imageSize);
+        }
+      }
+      frames.push(image);
+      for (const particles of particleSets) for (const particle of particles) updateEngineParticle(particle, parameter.imageSize);
+    }
+    return frames;
+  }
 }
 
 async function generateFramesByAttribute(parameter) {
-  switch (parameter.attribute) {
-    case "fire":
-      return await generateFireFrames(
-        parameter.particleCount,
-        parameter.frameCount,
-        parameter.imageSize,
-      );
-    case "poison":
-      return await generatePoisonFrames(
-        parameter.particleCount,
-        parameter.frameCount,
-        parameter.imageSize,
-      );
-    case "ice":
-      return await generateIceFrames(
-        parameter.particleCount,
-        parameter.frameCount,
-        parameter.imageSize,
-      );
-    case "thunder":
-      return await generateThunderFrames(
-        parameter.particleCount,
-        parameter.frameCount,
-        parameter.imageSize,
-      );
-    default:
-      throw new Error("対応していないattributeです。");
-  }
+  return new ParticleEngine(parameter).generateFrames();
 }
 
 //=====================================
@@ -1071,7 +1187,7 @@ client.on("messageCreate", async (message) => {
       const parameter = parseParameter(result);
       await message.reply(
         `
-attribute : ${parameter.attribute}
+attributes : ${parameter.attributes.join(" + ")}
 
 particleCount : ${parameter.particleCount}
 
@@ -1112,7 +1228,7 @@ imageSize : ${parameter.imageSize}
       const gifFile = await createGIF(frames, "effect.gif");
       await message.reply({
         content: `
-attribute : ${parameter.attribute}
+attributes : ${parameter.attributes.join(" + ")}
 particleCount : ${parameter.particleCount}
 frameCount : ${parameter.frameCount}
 imageSize : ${parameter.imageSize}
